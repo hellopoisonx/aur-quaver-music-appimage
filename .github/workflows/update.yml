@@ -1,0 +1,70 @@
+name: Update package
+
+# Runs update.sh against the newest upstream release, commits PKGBUILD/.SRCINFO
+# here and pushes the same commit to AUR. Needs the AUR_SSH_PRIVATE_KEY secret
+# (private half of a key registered on your AUR account).
+on:
+  schedule:
+    # No cross-repo release events: poll upstream once a day.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream release to package (empty = latest stable)'
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # makepkg refuses to run as root; switch to a user with the runner's uid
+      # so the files it writes stay owned by the runner.
+      - name: Run update.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e GITHUB_TOKEN \
+            archlinux:base-devel bash -euc "
+              pacman -Syu --noconfirm --needed git jq >/dev/null
+              useradd -m -u $(id -u) builder
+              su -s /bin/bash builder -c './update.sh $VERSION'
+            "
+
+      - name: Commit
+        id: commit
+        run: |
+          if git diff --quiet -- PKGBUILD .SRCINFO; then exit 0; fi
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git commit -qm "update: $(sed -n 's/^pkgver=//p' PKGBUILD)" -- PKGBUILD .SRCINFO
+          echo changed=true >> "$GITHUB_OUTPUT"
+
+      - name: Push to GitHub
+        if: steps.commit.outputs.changed == 'true'
+        run: git push origin HEAD:master
+
+      # Unconditional: an already-synced AUR just reports "Everything
+      # up-to-date", and a run that committed but failed here is retried on the
+      # next tick.
+      - name: Push to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND='ssh -i ~/.ssh/aur -o IdentitiesOnly=yes' \
+            git push ssh://aur@aur.archlinux.org/quaver-music-appimage.git HEAD:master
