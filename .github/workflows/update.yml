@@ -55,9 +55,10 @@ jobs:
         if: steps.commit.outputs.changed == 'true'
         run: git push origin HEAD:master
 
-      # Unconditional: an already-synced AUR just reports "Everything
-      # up-to-date", and a run that committed but failed here is retried on the
-      # next tick.
+      # AUR rejects subdirectories and its history must stay flat, so it gets
+      # only PKGBUILD/.SRCINFO, in a commit built on a fresh clone instead of
+      # ours. Running it unconditionally also retries a sync that previously
+      # committed but failed to push.
       - name: Push to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -66,5 +67,12 @@ jobs:
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
           ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-          GIT_SSH_COMMAND='ssh -i ~/.ssh/aur -o IdentitiesOnly=yes' \
-            git push ssh://aur@aur.archlinux.org/quaver-music-appimage.git HEAD:master
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur -o IdentitiesOnly=yes'
+          git clone -q ssh://aur@aur.archlinux.org/quaver-music-appimage.git "$RUNNER_TEMP/aur"
+          cd "$RUNNER_TEMP/aur"
+          cp "$GITHUB_WORKSPACE/PKGBUILD" "$GITHUB_WORKSPACE/.SRCINFO" .
+          if git diff --quiet; then exit 0; fi
+          git -c user.name="${GITHUB_ACTOR}" \
+              -c user.email="${GITHUB_ACTOR}@users.noreply.github.com" \
+              commit -qm "update: $(sed -n 's/^pkgver=//p' PKGBUILD)" -- PKGBUILD .SRCINFO
+          git push -q origin HEAD:master
